@@ -1,0 +1,255 @@
+import streamlit as st
+import pandas as pd
+import datetime
+import plotly.graph_objects as go
+from io import BytesIO
+
+st.set_page_config(page_title="Construction Planner", layout="wide")
+st.title("Construction Schedule Planner")
+
+st.sidebar.header("Add New Task")
+
+# Initialize session state
+if "tasks" not in st.session_state:
+    st.session_state.tasks = []
+
+# Sidebar form to add new task
+with st.sidebar.form("task_form"):
+    task_name = st.text_input("Task Name").strip()
+    duration = st.number_input("Duration (days)", min_value=1, value=1)
+    start_date = st.date_input("Start Date", datetime.date.today())
+    dependency = st.text_input("Depends on (task name, optional)").strip()
+    progress = st.slider("Progress (%)", 0, 100, 0)
+    submitted = st.form_submit_button("Add Task")
+
+# Add task with validation
+if submitted:
+    existing_names = [task["Task"].lower() for task in st.session_state.tasks]
+    if not task_name:
+        st.sidebar.warning("❌ Task name cannot be empty.")
+    elif task_name.lower() in existing_names:
+        st.sidebar.warning("⚠️ Task name already exists.")
+    else:
+        st.session_state.tasks.append({
+            "Task": task_name,
+            "Duration": duration,
+            "Start Date": start_date,
+            "Depends On": dependency,
+            "Progress": progress,
+            "Actual Start": None,
+            "Actual Finish": None,
+            "Delay": None
+        })
+        st.sidebar.success("✅ Task added!")
+
+# Load tasks from uploaded Excel file
+def load_tasks_from_excel(uploaded_file):
+    try:
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
+        if "Task" in df.columns and "Duration" in df.columns:
+            # Fill only missing columns if they don't exist
+            if "Actual Start" not in df.columns:
+                df["Actual Start"] = None
+            if "Actual Finish" not in df.columns:
+                df["Actual Finish"] = None
+            if "Delay" not in df.columns:
+                df["Delay"] = None
+
+            df["Depends On"] = df.get("Depends On", "")
+            df["Progress"] = df.get("Progress", 0)
+
+            st.session_state.tasks = df.to_dict(orient="records")
+            st.sidebar.success("📂 Data loaded successfully!")
+        else:
+            st.sidebar.error("❌ Invalid Excel file format!")
+    except Exception as e:
+        st.sidebar.error(f"❌ Error loading file: {e}")
+
+# File uploader for loading existing tasks
+uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx"])
+
+if uploaded_file is not None:
+    load_tasks_from_excel(uploaded_file)
+
+# Save tasks to Excel
+def save_tasks_to_excel():
+    if st.session_state.tasks:
+        df = pd.DataFrame(st.session_state.tasks)
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Tasks")
+        output.seek(0)
+        return output
+    else:
+        st.sidebar.warning("No tasks to save!")
+
+# Button to download tasks as an Excel file
+if st.sidebar.button("Save Tasks to Excel"):
+    output = save_tasks_to_excel()
+    if output:
+        st.sidebar.download_button(
+            label="Download Tasks as Excel",
+            data=output,
+            file_name="tasks_schedule.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Show tasks if available
+if st.session_state.tasks:
+    df = pd.DataFrame(st.session_state.tasks)
+    df["Start Date"] = pd.to_datetime(df["Start Date"]).dt.strftime("%Y-%m-%d")
+    df["End Date"] = (pd.to_datetime(df["Start Date"]) + pd.to_timedelta(df["Duration"] - 1, unit='D')).dt.strftime("%Y-%m-%d")
+    df["Depends On"] = df["Depends On"].fillna("").astype(str).str.strip()
+
+    tab1, tab2 = st.tabs(["📋 Project Schedule", "📈 Gantt Chart"])
+
+    with tab1:
+        st.subheader("📋 Project Schedule")
+        st.dataframe(df)
+
+        st.subheader("✅ Task Progress")
+        if uploaded_file is not None:
+            load_tasks_from_excel(uploaded_file)
+            for task in st.session_state.tasks:
+                if not (0 <= task["Progress"] <= 100):
+                    st.sidebar.warning(f"⚠️ Progress value for task '{task['Task']}' is out of bounds: {task['Progress']}")
+
+        st.subheader("✏️ Edit Task")
+        task_names = [t["Task"] for t in st.session_state.tasks]
+        selected_task = st.selectbox("Select a task", task_names)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            new_progress = st.slider("Update progress (%)", 0, 100, key="progress_slider")
+        with col2:
+            actual_start = st.date_input("Actual Start Date", key="actual_start")
+        with col3:
+            actual_finish = st.date_input("Actual Finish Date", key="actual_finish")
+
+        if st.button("Update Task"):
+            for task in st.session_state.tasks:
+                if task["Task"] == selected_task:
+                    task["Progress"] = new_progress
+                    task["Actual Start"] = actual_start.strftime("%Y-%m-%d") if actual_start else None
+                    task["Actual Finish"] = actual_finish.strftime("%Y-%m-%d") if actual_finish else None
+                    if actual_finish:
+                        planned_finish = pd.to_datetime(task["Start Date"]) + pd.to_timedelta(task["Duration"] - 1, unit='D')
+                        delay_days = (pd.to_datetime(actual_finish) - planned_finish).days
+                        if delay_days > 0:
+                            task["Delay"] = delay_days
+                        elif delay_days < 0:
+                            task["Delay"] = delay_days
+                        else:
+                            task["Delay"] = 0
+                    else:
+                        task["Delay"] = None
+            st.success("Task updated!")
+            st.rerun()
+
+    with tab2:
+        st.subheader("📈 Gantt Chart with Progress and Dependencies")
+        gantt_df = df.copy()
+        gantt_df["Task Label"] = gantt_df["Task"] + " #" + gantt_df.index.astype(str)
+
+        fig = go.Figure()
+        day_to_ms = 86400000
+
+        try:
+            added_legends = set()
+            for i, row in gantt_df.iterrows():
+                start_ts = pd.to_datetime(row["Start Date"]).timestamp() * 1000
+                duration_ms = row["Duration"] * day_to_ms
+
+                name = "Planned"
+                showlegend = name not in added_legends
+                fig.add_trace(go.Bar(
+                    x=[duration_ms],
+                    y=[row["Task Label"]],
+                    orientation="h",
+                    base=start_ts,
+                    marker=dict(color="lightgray"),
+                    name=name,
+                    showlegend=showlegend,
+                    hovertemplate=f"<b>{row['Task']}</b><br>Start: {row['Start Date']}<br>End: {row['End Date']}<extra></extra>"
+                ))
+                added_legends.add(name)
+
+                if row["Progress"] > 0:
+                    progress_fraction = row["Progress"] / 100
+                    progress_duration = row["Duration"] * progress_fraction
+                    progress_ms = progress_duration * day_to_ms
+
+                    name = "Progress"
+                    showlegend = name not in added_legends
+                    fig.add_trace(go.Bar(
+                        x=[progress_ms],
+                        y=[row["Task Label"]],
+                        orientation="h",
+                        base=start_ts,
+                        marker=dict(color="green", opacity=1),
+                        name=name,
+                        showlegend=showlegend,
+                        hovertemplate=f"<b>{row['Task']} Progress</b><br>{row['Progress']}% Complete<extra></extra>"
+                    ))
+                    added_legends.add(name)
+
+                if pd.notnull(row["Actual Start"]) and pd.notnull(row["Actual Finish"]):
+                    actual_start_ts = pd.to_datetime(row["Actual Start"]).timestamp() * 1000
+                    actual_duration_ms = (pd.to_datetime(row["Actual Finish"]) - pd.to_datetime(row["Actual Start"]) + pd.Timedelta(days=1)).total_seconds() * 1000
+
+                    delay_color = "#ff4c4c"
+                    opacity = 0.5
+                    name = "Actual (On Time)"
+                    if isinstance(row["Delay"], (int, float)):
+                        if row["Delay"] > 0:
+                            delay_color = "#ff4c4c"
+                            name = "Actual (Delayed)"
+                        elif row["Delay"] < 0:
+                            delay_color = "#ffd700"
+                            name = "Actual (Ahead)"
+                        else:
+                            delay_color = "#ffa500"
+                            name = "Actual (On Time)"
+
+                    showlegend = name not in added_legends
+                    fig.add_trace(go.Bar(
+                        x=[actual_duration_ms],
+                        y=[row["Task Label"]],
+                        orientation="h",
+                        base=actual_start_ts,
+                        marker=dict(color=delay_color, opacity=opacity),
+                        name=name,
+                        showlegend=showlegend,
+                        hovertemplate=f"<b>{row['Task']} Actual</b><br>Start: {row['Actual Start']}<br>Finish: {row['Actual Finish']}<br>Delay: {row['Delay']} day(s)<extra></extra>"
+                    ))
+                    added_legends.add(name)
+
+                if row["Depends On"]:
+                    dep_task = gantt_df[gantt_df["Task"].str.lower() == row["Depends On"].lower()]
+                    if not dep_task.empty:
+                        dep_row = dep_task.iloc[0]
+                        dep_end_ts = pd.to_datetime(dep_row["End Date"] + pd.Timedelta(days=1)).timestamp() * 1000
+                        fig.add_annotation(
+                            x=start_ts, y=row["Task Label"],
+                            ax=dep_end_ts, ay=dep_row["Task Label"],
+                            xref="x", yref="y", axref="x", ayref="y",
+                            showarrow=True,
+                            arrowhead=3, arrowwidth=2,
+                            arrowcolor="red"
+                        )
+
+            fig.update_yaxes(autorange="reversed")
+            fig.update_layout(
+                title="Gantt Chart with Progress and Dependencies",
+                xaxis_title="Date",
+                xaxis=dict(type="date", tickformat="%Y-%m-%d", ticklabelmode="period"),
+                height=600,
+                barmode="overlay"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error rendering chart: {e}")
+else:
+    st.info("🗒️ Add some tasks to get started!")
+
+st.caption("Built with ❤️ using Streamlit and Plotly")
