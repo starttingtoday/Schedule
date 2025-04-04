@@ -43,37 +43,37 @@ if submitted:
         st.sidebar.success("✅ Task added!")
 
 # Load tasks from uploaded Excel file
+@st.cache_data(show_spinner=False)
 def load_tasks_from_excel(uploaded_file):
-    try:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
-        if "Task" in df.columns and "Duration" in df.columns:
-            df["Actual Start"] = pd.to_datetime(df.get("Actual Start"))
-            df["Actual Finish"] = pd.to_datetime(df.get("Actual Finish"))
-            df["Depends On"] = df.get("Depends On", "")
-            df["Progress"] = df.get("Progress", 0)
-            df["Start Date"] = pd.to_datetime(df["Start Date"])
+    df = pd.read_excel(uploaded_file, engine='openpyxl')
+    if "Task" in df.columns and "Duration" in df.columns:
+        df["Actual Start"] = pd.to_datetime(df.get("Actual Start"))
+        df["Actual Finish"] = pd.to_datetime(df.get("Actual Finish"))
+        df["Depends On"] = df.get("Depends On", "")
+        df["Progress"] = df.get("Progress", 0)
+        df["Start Date"] = pd.to_datetime(df["Start Date"])
 
-            # Recalculate Delay
-            delays = []
-            for _, row in df.iterrows():
-                if pd.notnull(row["Actual Finish"]):
-                    planned_finish = row["Start Date"] + pd.Timedelta(days=row["Duration"] - 1)
-                    delay_days = (row["Actual Finish"] - planned_finish).days
-                    delays.append(delay_days if delay_days != 0 else 0)
-                else:
-                    delays.append(None)
-            df["Delay"] = delays
+        delays = []
+        for _, row in df.iterrows():
+            if pd.notnull(row["Actual Finish"]):
+                planned_finish = row["Start Date"] + pd.Timedelta(days=row["Duration"] - 1)
+                delay_days = (row["Actual Finish"] - planned_finish).days
+                delays.append(delay_days if delay_days != 0 else 0)
+            else:
+                delays.append(None)
+        df["Delay"] = delays
 
-            st.session_state.tasks = df.to_dict(orient="records")
-            st.sidebar.success("📂 Data loaded successfully!")
-        else:
-            st.sidebar.error("❌ Invalid Excel file format!")
-    except Exception as e:
-        st.sidebar.error(f"❌ Error loading file: {e}")
+        return df.to_dict(orient="records")
+    else:
+        raise ValueError("Invalid Excel file format")
 
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx"])
 if uploaded_file is not None:
-    load_tasks_from_excel(uploaded_file)
+    try:
+        st.session_state.tasks = load_tasks_from_excel(uploaded_file)
+        st.sidebar.success("📂 Data loaded successfully!")
+    except Exception as e:
+        st.sidebar.error(f"❌ Error loading file: {e}")
 
 def save_tasks_to_excel():
     if st.session_state.tasks:
@@ -99,6 +99,8 @@ if st.sidebar.button("Save Tasks to Excel"):
 if st.session_state.tasks:
     df = pd.DataFrame(st.session_state.tasks)
     df["Start Date"] = pd.to_datetime(df["Start Date"]).dt.strftime("%Y-%m-%d")
+    df["Actual Start"] = pd.to_datetime(df["Actual Start"]).dt.strftime("%Y-%m-%d")
+    df["Actual Finish"] = pd.to_datetime(df["Actual Finish"]).dt.strftime("%Y-%m-%d")
     df["End Date"] = (pd.to_datetime(df["Start Date"]) + pd.to_timedelta(df["Duration"] - 1, unit='D')).dt.strftime("%Y-%m-%d")
     df["Depends On"] = df["Depends On"].fillna("").astype(str).str.strip()
 
@@ -109,23 +111,25 @@ if st.session_state.tasks:
         st.dataframe(df)
 
         st.subheader("✅ Task Progress")
-        if uploaded_file is not None:
-            load_tasks_from_excel(uploaded_file)
-            for task in st.session_state.tasks:
-                if not (0 <= task["Progress"] <= 100):
-                    st.sidebar.warning(f"⚠️ Progress value for task '{task['Task']}' is out of bounds: {task['Progress']}")
-
         st.subheader("✏️ Edit Task")
         task_names = [t["Task"] for t in st.session_state.tasks]
         selected_task = st.selectbox("Select a task", task_names)
 
+        selected_data = next((t for t in st.session_state.tasks if t["Task"] == selected_task), {})
+        default_progress = selected_data.get("Progress", 0)
+
+        actual_start_val = selected_data.get("Actual Start")
+        actual_finish_val = selected_data.get("Actual Finish")
+        default_start = pd.to_datetime(actual_start_val).date() if pd.notnull(actual_start_val) else datetime.date.today()
+        default_finish = pd.to_datetime(actual_finish_val).date() if pd.notnull(actual_finish_val) else datetime.date.today()
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            new_progress = st.slider("Update progress (%)", 0, 100, key="progress_slider")
+            new_progress = st.slider("Update progress (%)", 0, 100, value=default_progress, key="progress_slider")
         with col2:
-            actual_start = st.date_input("Actual Start Date", key="actual_start")
+            actual_start = st.date_input("Actual Start Date", value=default_start, key="actual_start")
         with col3:
-            actual_finish = st.date_input("Actual Finish Date", key="actual_finish")
+            actual_finish = st.date_input("Actual Finish Date", value=default_finish, key="actual_finish")
 
         if st.button("Update Task"):
             for task in st.session_state.tasks:
@@ -261,4 +265,5 @@ else:
     st.info("🗒️ Add some tasks to get started!")
 
 st.caption("Built with ❤️ using Streamlit and Plotly")
+
 
