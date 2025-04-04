@@ -47,15 +47,22 @@ def load_tasks_from_excel(uploaded_file):
     try:
         df = pd.read_excel(uploaded_file, engine='openpyxl')
         if "Task" in df.columns and "Duration" in df.columns:
-            if "Actual Start" not in df.columns:
-                df["Actual Start"] = None
-            if "Actual Finish" not in df.columns:
-                df["Actual Finish"] = None
-            if "Delay" not in df.columns:
-                df["Delay"] = None
-
+            df["Actual Start"] = pd.to_datetime(df.get("Actual Start"))
+            df["Actual Finish"] = pd.to_datetime(df.get("Actual Finish"))
             df["Depends On"] = df.get("Depends On", "")
             df["Progress"] = df.get("Progress", 0)
+            df["Start Date"] = pd.to_datetime(df["Start Date"])
+
+            # Recalculate Delay
+            delays = []
+            for _, row in df.iterrows():
+                if pd.notnull(row["Actual Finish"]):
+                    planned_finish = row["Start Date"] + pd.Timedelta(days=row["Duration"] - 1)
+                    delay_days = (row["Actual Finish"] - planned_finish).days
+                    delays.append(delay_days if delay_days != 0 else 0)
+                else:
+                    delays.append(None)
+            df["Delay"] = delays
 
             st.session_state.tasks = df.to_dict(orient="records")
             st.sidebar.success("📂 Data loaded successfully!")
@@ -95,10 +102,10 @@ if st.session_state.tasks:
     df["End Date"] = (pd.to_datetime(df["Start Date"]) + pd.to_timedelta(df["Duration"] - 1, unit='D')).dt.strftime("%Y-%m-%d")
     df["Depends On"] = df["Depends On"].fillna("").astype(str).str.strip()
 
-    tab1, tab2 = st.tabs(["📋 Project Schedule", "📈 Gantt Chart"])
+    tab1, tab2 = st.tabs(["📜 Project Schedule", "📈 Gantt Chart"])
 
     with tab1:
-        st.subheader("📋 Project Schedule")
+        st.subheader("📜 Project Schedule")
         st.dataframe(df)
 
         st.subheader("✅ Task Progress")
@@ -148,10 +155,13 @@ if st.session_state.tasks:
             for i, row in gantt_df.iterrows():
                 start_ts = pd.to_datetime(row["Start Date"]).timestamp() * 1000
                 duration_ms = row["Duration"] * day_to_ms
+                offset = 0
 
+                # Planned + Progress (upper half)
                 fig.add_trace(go.Bar(
                     x=[duration_ms], y=[row["Task Label"]], orientation="h",
                     base=start_ts, marker=dict(color="lightgray"),
+                    width=0.4, offset=-0.2,
                     name="Planned", showlegend="Planned" not in added_legends,
                     hovertemplate=f"<b>{row['Task']}</b><br>Start: {row['Start Date']}<br>End: {row['End Date']}<extra></extra>"
                 ))
@@ -162,11 +172,13 @@ if st.session_state.tasks:
                     fig.add_trace(go.Bar(
                         x=[progress_duration_ms], y=[row["Task Label"]], orientation="h",
                         base=start_ts, marker=dict(color="green", opacity=1),
+                        width=0.4, offset=-0.2,
                         name="Progress", showlegend="Progress" not in added_legends,
                         hovertemplate=f"<b>{row['Task']} Progress</b><br>{row['Progress']}% Complete<extra></extra>"
                     ))
                     added_legends.add("Progress")
 
+                # Actual (lower half)
                 if pd.notnull(row["Actual Start"]) and pd.notnull(row["Actual Finish"]):
                     actual_start_ts = pd.to_datetime(row["Actual Start"]).timestamp() * 1000
                     actual_duration_ms = (pd.to_datetime(row["Actual Finish"]) - pd.to_datetime(row["Actual Start"]) + pd.Timedelta(days=1)).total_seconds() * 1000
@@ -182,21 +194,42 @@ if st.session_state.tasks:
                     fig.add_trace(go.Bar(
                         x=[actual_duration_ms], y=[row["Task Label"]], orientation="h",
                         base=actual_start_ts, marker=dict(color=delay_color, opacity=0.5),
+                        width=0.4, offset=0.2,
                         name=name, showlegend=name not in added_legends,
                         hovertemplate=f"<b>{row['Task']} Actual</b><br>Start: {row['Actual Start']}<br>Finish: {row['Actual Finish']}<br>Delay: {row['Delay']} day(s)<extra></extra>"
                     ))
                     added_legends.add(name)
 
+                # Dependency arrow (perpendicular shape)
                 if row["Depends On"]:
                     dep_task = gantt_df[gantt_df["Task"].str.lower() == row["Depends On"].lower()]
                     if not dep_task.empty:
                         dep_row = dep_task.iloc[0]
                         dep_end_ts = pd.to_datetime(dep_row["End Date"]).timestamp() * 1000 + day_to_ms
+
+                        # Draw vertical line from predecessor to same y-level as current
+                        fig.add_shape(type="line",
+                                      x0=dep_end_ts, y0=dep_row["Task Label"],
+                                      x1=dep_end_ts, y1=row["Task Label"],
+                                      line=dict(color="rgba(255,0,0,1)", width=1))
+
+                        # Draw horizontal line to current task
+                        fig.add_shape(type="line",
+                                      x0=dep_end_ts, y0=row["Task Label"],
+                                      x1=start_ts - 100000, y1=row["Task Label"],
+                                      line=dict(color="rgba(255,0,0,1)", width=1))
+
+                        # Final arrow from near current to task start (fix with no text and allowarrowhead)
                         fig.add_annotation(
                             x=start_ts, y=row["Task Label"],
-                            ax=dep_end_ts, ay=dep_row["Task Label"],
+                            ax=dep_end_ts, ay=row["Task Label"],
                             xref="x", yref="y", axref="x", ayref="y",
-                            showarrow=True, arrowhead=3, arrowwidth=2, arrowcolor="red"
+                            text="",
+                            showarrow=True,
+                            arrowhead=2,
+                            arrowsize=1,
+                            arrowwidth=1,
+                            arrowcolor="rgba(255,0,0,1)"
                         )
 
             fig.update_yaxes(autorange="reversed", title="Tasks", showgrid=True, tickfont=dict(size=14))
